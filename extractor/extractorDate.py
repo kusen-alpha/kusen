@@ -1,148 +1,84 @@
 import re
 import time
-import conf
+import configparser
 from datetime import datetime
 from datetime import timedelta
-from lxml.html import fromstring
-from lxml.etree import ParserError
+from lxml.html import fromstring, tostring, HtmlElement
+from tools.content import StringContent, NumberContent, DateContent
 
 
-def cutSymbol(s: str, re_remove='', re_retain=''):
-    """
-    去除指定符号
-    :param 待处理的文本:
-    :param re_remove:需要删除的符号
-    :param re_retain: 需要保留的符号
-    :return: 处理完成的文本
-    """
-    if re_remove != '' and isinstance(re_remove, str):
-        re_remove = [re_remove]
-    if re_retain != '' and isinstance(re_retain, str):
-        re_retain = [re_retain]
-    re_default = [' ', '\r\n', '<', '>', '!', '\t', '\n', '·']
-    re_parrent = set(re_remove) or set(re_default).difference(set(re_retain))
-    re_parrent = ''.join(list(re_parrent))
-    re_parrent = '[%s]' % re_parrent
-    return re.sub(r'%s' % re_parrent, '', s.strip())
+class DateTextExtract(object):
+    def __init__(self, text=None, is_de_noise_by_character=True, characters_removes=None, characters_retains=None,
+                 is_zh2arabic=True, is_zh_month_parse=True, zh_month_suffix='月', is_en_month_parse=True,
+                 en_month_suffix=''):
 
+        self.is_de_noise_by_character = is_de_noise_by_character
+        self.characters_removes = characters_removes
+        self.characters_retains = characters_retains
+        self.is_zh2arabic = is_zh2arabic
+        self.is_zh_month_parse = is_zh_month_parse
+        self.zh_month_suffix = zh_month_suffix
+        self.is_en_month_parse = is_en_month_parse
+        self.en_month_suffix = en_month_suffix
 
-def special2ArabicNumber(text):
-    """
-    将非阿拉伯数字转为阿拉伯数字
-    :param text: 待处理的文本
-    :return: 处理完成的文本
-    """
-    for i in conf.SPECIAL_NUMBERS:  # 默认的数字对照表
-        for j in i[1:]:
-            text = re.sub(r'%s' % j, str(i[0]), text)
-    return text
+        self.result_struct_time = None
 
+        self.config = self.get_config('datetime_pattern.ini')
+        self.time_pattern = eval(self.config.get('DATETIME', 'DATETIME_PATTERN'))
+        if not text:
+            raise ValueError('文本不能为空！')
+        self.text = text
 
-def dateEn2DateCn(text):
-    """
-    将英文日期转为中文日期
-    :param text: 待处理的文本
-    :return: 处理完的文本
-    """
-    for i in conf.DATE_EN:
-        for j in i[1:]:
-            text = re.sub(r'%s' % j, str(i[0]), text)
-    return text
+    @staticmethod
+    def get_config(file_name):
+        config = configparser.ConfigParser()
+        config.read('conf/%s' % file_name, encoding='utf-8')
+        return config
 
+    def extract(self, *args, **kwargs):
+        return self._extract_text(self.text, *args, **kwargs)
 
-def processText(text):
-    text = cutSymbol(text, re_retain=' ')
-    text = special2ArabicNumber(text)
-    text = dateEn2DateCn(text)
-    return text
+    def _extract_text(self, text, is_struct=False, mode='s', is_float=False, default_date='now'):
+        self._extract_from_text(text, default_date=default_date)
+        if is_struct:
+            return self.result_struct_time
+        time_stamp = self.result_struct_time.timestamp()
+        if mode == 's':
+            return int(time_stamp)
+        elif mode == 'ms':
+            if is_float:
+                return int(time_stamp * 1000)
+            return int(time_stamp) * 1000
 
-
-class extractDateFromText(object):
-    def __init__(self, dateStr=None):
-        """
-
-        :param dateStr: 含有时间的文本
-        """
-        self.dateStr = dateStr
-        self.time_pattern = conf.DATETIME_PATTERN
-        if dateStr:
-            self.extract(self.dateStr)
-
-    def extract(self, dateStr=None, type='s', isfloat=False, notfind=None):
-        """
-        解析文本中的时间
-        :param dateStr: 含有时间的文本
-        :param type: 获取时间的类型，s为秒，ms为毫秒
-        :param isfloat: 是否保留小数
-        :param notfind: 当没匹配到时间时返回的时间类型
-        :return: 返回一个(datetime对象,时间戳)
-        """
-        if dateStr:
-            self.dateStr = dateStr
-        self.date = self._extract(self.dateStr, notfind=notfind)
-        self.time_stamp = self._date2timestamp(self.date)
-        return self.date, self.getTimeStamp(type=type, isfloat=isfloat)
-
-    def getDdate(self):
-        return self.date
-
-    def getTimeStamp(self, type='s', isfloat=True):
-        """
-        获取时间戳
-        :param type: 获取时间的类型，s为秒，ms为毫秒
-        :param isfloat: 是否保留小数
-        :return: 时间戳
-        """
-        if not self.time_stamp:
-            return ""
-        if not isfloat:
-            self.time_stamp = int(self.time_stamp)
-        if type == 'ms':
-            self.time_stamp = int(self.time_stamp * 1000)
-        return self.time_stamp
-
-    def _date2timestamp(self, date: datetime):
-        """
-        datetime结构化时间转时间戳
-        :param date: datetime格式的时间
-        :return: 时间戳
-        """
-        if not date:
-            return ""
-        return date.timestamp()
-
-    def _extract(self, dateStr, notfind):
-        """
-        解析文本中的时间
-        :param dateStr:待处理的时间文本
-        :param notfind:当没匹配到时间时返回的时间类型
-        :return: 结构化时间或''
-        """
-        my_datetime = datetime.today()  # 当前时间
+    def _extract_from_text(self, text, default_date):
+        now = datetime.today()  # 当前时间
+        self.text = text
+        if self.is_de_noise_by_character:
+            self.text = StringContent.de_noise_by_character(self.text, self.characters_removes,
+                                                            self.characters_retains)
+        if self.is_zh2arabic:
+            self.text = NumberContent.zh2arabic(self.text)
+        if self.is_zh_month_parse:
+            self.text = DateContent.zh_month_parse(self.text, suffix=self.zh_month_suffix)
+        if self.is_en_month_parse:
+            self.text = DateContent.en_month_parse(self.text, suffix=self.en_month_suffix)
         for pattern in self.time_pattern:
             try:
-                dt_obj = re.search(pattern, dateStr, re.M | re.I)
-            except:
-                print('error pattern is :', pattern)
+                dt_obj = re.search(pattern, self.text, re.M | re.I)
+            except Exception as e:
+                # print('error pattern is :', pattern, e)
                 continue
             if dt_obj:
-                print(pattern)
-                my_struct_time = self._set_struct_time(my_datetime, dt_obj.groupdict())
-                return my_struct_time
+                # print(pattern)
+                self._set_struct_time(now, dt_obj.groupdict())
+                break
         else:
-            if notfind == 'now':
-                return my_datetime
-            return ''
+            if default_date == 'now':
+                self.result_struct_time = now
+            else:
+                self.result_struct_time = default_date
 
     def _set_struct_time(self, base_time, dt_obj_groupdict):
-        """
-        计算处理时间
-        :param base_time: 初始时间
-        :param dt_obj_groupdict: 正则匹配到的时间分组字典
-        :return: 结构化时间
-        """
-        print(dt_obj_groupdict)
-
         # 抽取到的标准时间
         year = self._get_data_from_group_data(dt_obj_groupdict, 'year', base_time.year, base_time.year)
         if isinstance(year, str) and len(year) == 2:
@@ -192,83 +128,88 @@ class extractDateFromText(object):
             change_date = timedelta(weeks=change_week, days=change_day, hours=change_hour, minutes=change_minute,
                                     seconds=change_second)
             if timestamp:
-                my_datetime = datetime.fromtimestamp(timestamp)
+                now = datetime.fromtimestamp(timestamp)
             else:
-                my_datetime = base_time.replace(year=year, month=month, day=day, hour=hour, minute=minute,
-                                                second=second)
-            last_datetime = my_datetime - change_date
+                now = base_time.replace(year=year, month=month, day=day, hour=hour, minute=minute,
+                                        second=second)
+            last_datetime = now - change_date
             if last_datetime > base_time:  # 不能大于当前时间
-                return base_time
-            return last_datetime
-        except Exception:
-            print('error')
-            return base_time
+                self.result_struct_time = base_time
+            else:
+                self.result_struct_time = last_datetime
+        except Exception as e:
+            # print('error', e)
+            self.result_struct_time = base_time
 
     def _get_data_from_group_data(self, group_data, group_type, group_donthave, group_none):
-        """
-        从分组字典中取值
-        :param group_data: 分组字典
-        :param group_type: 获取的类型,字典的key
-        :param group_donthave: 当分组字典中没有时赋予的值
-        :param group_none: 当分组字典获取为''时赋予的值
-        :return: 获取的值
-        """
         data = group_data.get(group_type, group_donthave)
         if not data:
             data = group_none
         return data
 
 
-def strhtml2element(strhtml):
-    try:
-        html = re.sub('</?br.*?>', '', strhtml)
-        element = fromstring(html)
-        return element
-    except ParserError:
-        return
+class DateHtmlExtract(DateTextExtract):
+    def __init__(self, text_or_html, *args, **kwargs):
+        if not text_or_html:
+            raise ValueError('请输入有意义的内容！')
+        if isinstance(text_or_html, str):
+            self.html = fromstring(text_or_html)
+            text = text_or_html
+        elif isinstance(text_or_html, HtmlElement):
+            self.html = text_or_html
+            text = tostring(text_or_html)
+        else:
+            raise ValueError('内容不合规范！')
+        super(DateHtmlExtract, self).__init__(text, *args, **kwargs)
+        self.publish_datetime = None
+        self.__datetime_tag = {}
 
+    def extract(self, *args, **kwargs):
+        self._extract_html(*args, **kwargs)
+        return self.publish_datetime
 
-class extractDateFromHtmlMeta(object):
-    def __init__(self, html=None):
-        """
+    def _extract_html(self, check_meta=True, whole_page=True, check_tags={}, restrict_xpath=None, restrict_re=None,
+                      *args, **kwargs):
+        if restrict_xpath or restrict_re:
+            self._extract_from_xpath_or_re(restrict_xpath, restrict_re)
+        if check_meta and not self.publish_datetime:
+            self._extract_from_meta()
+        if check_tags and not self.publish_datetime:
+            self._extract_from_tag(check_tags)
+        if whole_page and not self.publish_datetime:
+            self._extract_whole_page(*args, **kwargs)
 
-        :param html: HtmlElement or strHtml
-        """
-        self.publish_time_meta = conf.PUBLISH_TIME_META
-        self.html = html
-        if self.html:
-            self.extract(self.html)
+    def _extract_from_tag(self, tags):
+        self.__datetime_tag.update(tags)
+        # TODO 找出符合条件的tag
 
-    def extract(self, html=None):
-        if html:
-            self.html = html
-        if isinstance(self.html, str):
-            self.html = strhtml2element(self.html)
-        if not self.html:
+    def _extract_from_xpath_or_re(self, xpath, _re):
+        result = self.text
+        if xpath:
+            xpath_result = self.html.xpath(xpath)
+            if xpath_result:
+                result = ''.join(xpath_result)
+        if _re:
+            result = re.search(_re, result).group(1)
+        if result:
+            self.publish_datetime = self._extract_text(result)
+
+    def _extract_whole_page(self):
+        self.publish_datetime = self._extract_text(self.text)
+
+    def _extract_from_meta(self):
+        html_time_meta = eval(self.get_config('datetime_pattern.ini').get('DATETIME', 'HTML_TIME_META'))
+        _html = self.html.xpath('//head')
+        if not len(_html):
             return
-        self.date = self._extract()
-        return self.date
-
-    def _extract(self):
-        for xpath in self.publish_time_meta:
-            publish_time = self.html.xpath(xpath)
+        for xpath in html_time_meta:
+            if xpath[:2] == '//':
+                xpath = xpath.replace('//', './', 1)
+            publish_time = _html[0].xpath(xpath)
             if publish_time:
-                return ''.join(publish_time)
-        return ''
+                self.publish_datetime = publish_time[0]
+                break
 
 
 if __name__ == '__main__':
-    text = '注册时间：2019年9月11日'
-    text = processText(text)
-    print('text:', text)
-    #
-    test = extractDateFromText(text)
-    print(test.extract(type='s', notfind='now'))
-
-    print('-' * 50)
-
-    # html="""
-    # """
-    # test2 = extractDateFromHtmlMeta(html)
-    # date_text = test2.extract()
-    # test.extract(date_text)
+    pass
